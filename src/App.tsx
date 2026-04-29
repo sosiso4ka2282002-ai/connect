@@ -268,6 +268,7 @@ export default function App() {
 			return next;
 		});
 		// Сохранить в локальной БД
+		let saved = true;
 		if (userId && activeNote) {
 			try {
 				await localNotes.update(activeNote.id, {
@@ -276,13 +277,16 @@ export default function App() {
 					updatedAt: new Date().toISOString(),
 				});
 			} catch (err) {
+				saved = false;
 				console.warn('notes.update error:', err);
 				setToastMsg('Не удалось сохранить');
 				setToastOpen(true);
 			}
 		}
-		setToastMsg('Заметка сохранена');
-		setToastOpen(true);
+		if (saved) {
+			setToastMsg('Заметка сохранена');
+			setToastOpen(true);
+		}
 	}, [activeNote, activeFileId, persist, userId, encKey]);
 
 	const handleClose = useCallback(() => {

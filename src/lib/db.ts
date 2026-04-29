@@ -157,7 +157,7 @@ export async function updateProfile(userId: string, updates: Partial<Omit<LocalP
 /* ── CRUD для userNotes ── */
 
 export async function getUserNotes(userId: string): Promise<LocalNote[]> {
-	return db.userNotes.where('userId').equals(userId).reverse().sortBy('updatedAt');
+	return db.userNotes.where('userId').equals(userId).sortBy('updatedAt').then(arr => arr.reverse());
 }
 
 export async function getUserNote(noteId: string): Promise<LocalNote | undefined> {
