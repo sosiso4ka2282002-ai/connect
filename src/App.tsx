@@ -11,7 +11,7 @@ import { Welcome } from './components/Welcome';
 import { SearchOverlay } from './components/SearchOverlay';
 import { TagBrowser } from './components/TagBrowser';
 import { SettingsModal } from './components/SettingsModal';
-import { supabase } from './lib/supabase';
+import { localAuth, localProfiles, localNotes } from './lib/localAuth';
 import { PassphraseModal } from './components/PassphraseModal';
 import { getSessionSalt, importKeyFromB64, tryDecryptString, encryptString } from './lib/crypto';
 import type { UserSettings } from './components/SettingsModal';
@@ -111,43 +111,35 @@ export default function App() {
 	// Требуем авторизацию и подгружаем заметки пользователя
 	useEffect(() => {
 		(async () => {
-			const { data } = await supabase.auth.getUser();
-			const user = data.user;
+			const user = await localAuth.getUser();
 			if (!user) {
 				window.location.href = '/';
 				return;
 			}
 			setUserId(user.id);
 			// профиль
-			const { data: prof } = await supabase.from('profiles').select('email, first_name, last_name, avatar_url').eq('id', user.id).maybeSingle();
+			const prof = await localProfiles.get(user.id);
 			if (prof) {
 				setSettings((prev) => ({
 					...prev,
 					email: prof.email || prev.email,
-					firstName: prof.first_name || '',
-					lastName: prof.last_name || '',
-					avatarDataUrl: prof.avatar_url || prev.avatarDataUrl,
+					firstName: prof.firstName || '',
+					lastName: prof.lastName || '',
+					avatarDataUrl: prof.avatarUrl || prev.avatarDataUrl,
 				}));
 			}
-			const { data: rows, error } = await supabase
-				.from('notes')
-				.select('id, title, content, updated_at, is_favorite')
-				.order('updated_at', { ascending: false });
-			if (!error && rows) {
-				const mapped: Record<string, VaultNote> = {};
-				for (const r of rows as any[]) {
-					let content: string = r.content ?? '';
-					// пробуем расшифровать, если есть ключ и формат enc:v1
-					if (typeof content === 'string' && content.startsWith('enc:v1:') && encKey) {
-						const plain = await tryDecryptString(content, encKey);
-						if (plain !== null) content = plain;
-					}
-					mapped[r.id] = { id: r.id, name: r.title ?? 'Без имени.md', updated: r.updated_at ?? '—', content };
+			const rows = await localNotes.list(user.id);
+			const mapped: Record<string, VaultNote> = {};
+			for (const r of rows) {
+				let content: string = r.content ?? '';
+				if (typeof content === 'string' && content.startsWith('enc:v1:') && encKey) {
+					const plain = await tryDecryptString(content, encKey);
+					if (plain !== null) content = plain;
 				}
-				setNotes(mapped);
-				// Показываем стартовый экран приложения; пользователь сам выберет файл
-				setMode('welcome');
+				mapped[r.id] = { id: r.id, name: r.title ?? 'Без имени.md', updated: r.updatedAt ?? '—', content };
 			}
+			setNotes(mapped);
+			setMode('welcome');
 		})();
 	}, [encKey]);
 
@@ -273,21 +265,26 @@ export default function App() {
 			persist(next, activeFileId);
 			return next;
 		});
-		// Сохранить на сервере
+		// Сохранить в локальной БД
+		let saved = true;
 		if (userId && activeNote) {
-			const { error } = await supabase
-				.from('notes')
-				.update({ title: activeNote.name, content: serverContent, updated_at: new Date().toISOString() })
-				.eq('id', activeNote.id)
-				.eq('user_id', userId);
-			if (error) {
-				console.warn('notes.update error:', error.message);
-				setToastMsg('Не удалось сохранить на сервере');
+			try {
+				await localNotes.update(activeNote.id, {
+					title: activeNote.name,
+					content: serverContent,
+					updatedAt: new Date().toISOString(),
+				});
+			} catch (err) {
+				saved = false;
+				console.warn('notes.update error:', err);
+				setToastMsg('Не удалось сохранить');
 				setToastOpen(true);
 			}
 		}
-		setToastMsg('Заметка сохранена');
-		setToastOpen(true);
+		if (saved) {
+			setToastMsg('Заметка сохранена');
+			setToastOpen(true);
+		}
 	}, [activeNote, activeFileId, persist, userId, encKey]);
 
 	const handleClose = useCallback(() => {
@@ -331,7 +328,7 @@ export default function App() {
 		});
 		if (userId && activeNote) {
 			const fav = !favorites[activeNote.id];
-			void supabase.from('notes').update({ is_favorite: fav }).eq('id', activeNote.id).eq('user_id', userId);
+			void localNotes.update(activeNote.id, { isFavorite: fav });
 		}
 	}, [activeNote, userId, favorites]);
 
@@ -343,10 +340,11 @@ export default function App() {
 			return next;
 		});
 		if (userId) {
-			const { error } = await supabase.from('notes').delete().eq('id', id);
-			if (error) {
-				console.warn('notes.delete error:', error.message);
-				setToastMsg('Не удалось удалить на сервере');
+			try {
+				await localNotes.delete(id);
+			} catch (err) {
+				console.warn('notes.delete error:', err);
+				setToastMsg('Не удалось удалить');
 				setToastOpen(true);
 			}
 		}
@@ -371,17 +369,18 @@ export default function App() {
 			return next;
 		});
 		if (userId) {
-			const { error } = await supabase.from('notes').insert({
-				id,
-				user_id: userId,
-				title: name,
-				content: '',
-				updated_at: new Date().toISOString(),
-				is_favorite: false,
-			});
-			if (error) {
-				console.warn('notes.insert error:', error.message);
-				setToastMsg('Не удалось создать заметку на сервере');
+			try {
+				await localNotes.insert({
+					id,
+					userId,
+					title: name,
+					content: '',
+					updatedAt: new Date().toISOString(),
+					isFavorite: false,
+				});
+			} catch (err) {
+				console.warn('notes.insert error:', err);
+				setToastMsg('Не удалось создать заметку');
 				setToastOpen(true);
 			}
 		}
@@ -530,16 +529,14 @@ export default function App() {
 				onSave={(next) => {
 					(async () => {
 						setSettings(next);
-						// применим тему сразу
 						document.body.classList.remove('theme-dark', 'theme-light', 'theme-amoled');
 						document.body.classList.add(`theme-${next.theme}`);
-						// сохранить профиль на сервере
 						if (userId) {
-							await supabase.from('profiles').update({
-								first_name: next.firstName,
-								last_name: next.lastName,
-								avatar_url: next.avatarDataUrl ?? null,
-							}).eq('id', userId);
+							await localProfiles.update(userId, {
+								firstName: next.firstName,
+								lastName: next.lastName,
+								avatarUrl: next.avatarDataUrl ?? null,
+							});
 						}
 						setToastMsg('Настройки сохранены');
 						setToastOpen(true);
@@ -547,7 +544,7 @@ export default function App() {
 				}}
 				onLogout={() => {
 					(async () => {
-						await supabase.auth.signOut();
+						await localAuth.signOut();
 						setToastMsg('Вы вышли из аккаунта');
 						setToastOpen(true);
 						setShowSettings(false);
