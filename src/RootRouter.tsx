@@ -3,7 +3,7 @@ import Landing from './pages/Landing';
 import App from './App';
 import NotFound from './pages/NotFound';
 import { useEffect, useState } from 'react';
-import { supabase } from './lib/supabase';
+import { localAuth } from './lib/localAuth';
 
 function ProtectedRoute({ children }: { children: JSX.Element }) {
 	const [loading, setLoading] = useState(true);
@@ -11,9 +11,9 @@ function ProtectedRoute({ children }: { children: JSX.Element }) {
 	useEffect(() => {
 		let mounted = true;
 		(async () => {
-			const { data } = await supabase.auth.getSession();
+			const { session } = await localAuth.getSession();
 			if (!mounted) return;
-			setAuthed(Boolean(data.session));
+			setAuthed(session);
 			setLoading(false);
 		})();
 		return () => { mounted = false; };

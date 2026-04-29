@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { FiX, FiUser, FiMail, FiLock, FiLogOut, FiImage, FiMonitor, FiEye } from 'react-icons/fi';
-import { supabase } from '../lib/supabase';
+import { localAuth, localProfiles } from '../lib/localAuth';
 import { decryptSecretWithPassword } from '../lib/crypto';
 import { generateAvatarDataUrl } from '../lib/avatar';
 
@@ -106,12 +106,10 @@ export function SettingsModal({ open, initial, onClose, onSave, onLogout, onChan
 							<button
 								type="button"
 								onClick={async () => {
-									// очистить аватар в UI и на сервере
 									setForm((p) => ({ ...p, avatarDataUrl: undefined }));
-									const { data: me } = await supabase.auth.getUser();
-									const uid = me.user?.id;
-									if (uid) {
-										await supabase.from('profiles').update({ avatar_url: null }).eq('id', uid);
+									const me = await localAuth.getUser();
+									if (me) {
+										await localProfiles.update(me.id, { avatarUrl: null });
 									}
 								}}
 								className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-sm text-rose-200 hover:bg-rose-500/20"
@@ -179,18 +177,13 @@ export function SettingsModal({ open, initial, onClose, onSave, onLogout, onChan
 											type="button"
 											onClick={async () => {
 												setRevealErr(null);
-												const { data: me } = await supabase.auth.getUser();
-												const uid = me.user?.id;
-												if (!uid) { setRevealErr('Нет сессии'); return; }
-												const { data: prof, error } = await supabase
-													.from('profiles')
-													.select('enc_salt, master_key_enc')
-													.eq('id', uid)
-													.maybeSingle();
-												if (error || !prof?.enc_salt || !prof?.master_key_enc) {
+												const me = await localAuth.getUser();
+												if (!me) { setRevealErr('Нет сессии'); return; }
+												const prof = await localProfiles.get(me.id);
+												if (!prof?.encSalt || !prof?.masterKeyEnc) {
 													setRevealErr('Фраза не найдена'); return;
 												}
-												const plain = await decryptSecretWithPassword(prof.master_key_enc, revealPass, prof.enc_salt);
+												const plain = await decryptSecretWithPassword(prof.masterKeyEnc, revealPass, prof.encSalt);
 												if (!plain) { setRevealErr('Неверный пароль'); return; }
 												setRevealValue(plain);
 											}}

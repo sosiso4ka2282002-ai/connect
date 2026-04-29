@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { FiX } from 'react-icons/fi';
-import { supabase } from '../lib/supabase';
+import { localAuth, localProfiles } from '../lib/localAuth';
 import { encryptSecretWithPassword, deriveKey, exportKeyToB64, saveSessionKeyInfo, generatePassphrase, decryptSecretWithPassword } from '../lib/crypto';
 import { generateAvatarDataUrl } from '../lib/avatar';
 
@@ -23,10 +23,6 @@ export function AuthModal({ open, mode, onClose, onSuccess }: AuthModalProps) {
 	const [error, setError] = useState<string | null>(null);
 
 	// синхронизируем вкладку модала с приходящим mode при каждом открытии/смене
-	// чтобы "Зарегистрироваться" всегда открывал нужную вкладку
-	// и "Войти" тоже
-	// (важно: делаем это до отрисовки формы)
-	// eslint-disable-next-line react-hooks/rules-of-hooks
 	useEffect(() => {
 		setActive(mode);
 	}, [mode, open]);
@@ -39,85 +35,58 @@ export function AuthModal({ open, mode, onClose, onSuccess }: AuthModalProps) {
 		setError(null);
 		try {
 			if (active === 'signup') {
-				const { data, error } = await supabase.auth.signUp({
+				const { user } = await localAuth.signUp(email, password, { first_name: firstName, last_name: lastName });
+				// генерируем фразу и шифруем её паролем пользователя
+				const passphrase = generatePassphrase();
+				const { saltB64, enc } = await encryptSecretWithPassword(passphrase, password);
+				// генерируем дефолтный аватар
+				const avatarDataUrl = generateAvatarDataUrl(firstName || lastName || email, email);
+				// сохраняем профиль
+				await localProfiles.upsert({
+					id: user.id,
 					email,
-					password,
-					options: { data: { first_name: firstName, last_name: lastName } },
+					firstName,
+					lastName,
+					encSalt: saltB64 || null,
+					masterKeyEnc: enc || null,
+					avatarUrl: avatarDataUrl,
 				});
-				if (error) throw error;
-				const user = data.user;
-				if (user) {
-					// генерируем фразу и шифруем её паролем пользователя
-					const passphrase = generatePassphrase();
-					const { saltB64, enc } = await encryptSecretWithPassword(passphrase, password);
-					// генерируем дефолтный аватар
-					const avatarDataUrl = generateAvatarDataUrl(firstName || lastName || email, email);
-					// upsert профиль с именем/фамилией и полями шифрования
-					// На HTTP enc_salt будет пустым, master_key_enc будет содержать незашифрованный passphrase
-					const { error: upErr } = await supabase
-						.from('profiles')
-						.upsert({
-							id: user.id,
-							email,
-							first_name: firstName,
-							last_name: lastName,
-							enc_salt: saltB64 || null,
-							master_key_enc: enc || null,
-							avatar_url: avatarDataUrl,
-						}, { onConflict: 'id' });
-					if (upErr) {
-						// не ломаем UX, просто логируем
-						console.warn('profiles upsert:', upErr.message);
-					}
-					// производный ключ для шифрования заметок из passphrase
-					// На HTTP encKey будет null, но это нормально - заметки будут храниться без шифрования
-					if (saltB64) {
-						const encKey = await deriveKey(passphrase, saltB64);
-						if (encKey) {
-							const b64 = await exportKeyToB64(encKey);
-							if (b64) {
-								saveSessionKeyInfo(b64, saltB64);
-							}
+				// производный ключ для шифрования заметок
+				if (saltB64) {
+					const encKey = await deriveKey(passphrase, saltB64);
+					if (encKey) {
+						const b64 = await exportKeyToB64(encKey);
+						if (b64) {
+							saveSessionKeyInfo(b64, saltB64);
 						}
 					}
 				}
 			} else {
-				const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-				if (error) throw error;
-				// попытка восстановить ключ шифрования из profiles
-				const user = data.user;
-				if (user) {
-					const { data: prof } = await supabase
-						.from('profiles')
-						.select('enc_salt, master_key_enc')
-						.eq('id', user.id)
-						.maybeSingle();
-					// На HTTP enc_salt будет пустым или null, master_key_enc будет содержать незашифрованный passphrase
-					if (prof?.master_key_enc) {
-						if (prof.enc_salt && prof.enc_salt.trim() !== '') {
-							// HTTPS: расшифровываем passphrase
-							const passphrase = await decryptSecretWithPassword(prof.master_key_enc, password, prof.enc_salt);
-							if (passphrase) {
-								const encKey = await deriveKey(passphrase, prof.enc_salt);
-								if (encKey) {
-									const b64 = await exportKeyToB64(encKey);
-									if (b64) {
-										saveSessionKeyInfo(b64, prof.enc_salt);
-									}
+				const { user } = await localAuth.signInWithPassword(email, password);
+				// попытка восстановить ключ шифрования из профиля
+				const prof = await localProfiles.get(user.id);
+				if (prof?.masterKeyEnc) {
+					if (prof.encSalt && prof.encSalt.trim() !== '') {
+						const passphrase = await decryptSecretWithPassword(prof.masterKeyEnc, password, prof.encSalt);
+						if (passphrase) {
+							const encKey = await deriveKey(passphrase, prof.encSalt);
+							if (encKey) {
+								const b64 = await exportKeyToB64(encKey);
+								if (b64) {
+									saveSessionKeyInfo(b64, prof.encSalt);
 								}
 							}
-						} else {
-							// HTTP: passphrase хранится в открытом виде (небезопасно, но работает)
-							// На HTTP шифрование недоступно, поэтому просто пропускаем
-							console.warn('Encryption not available on HTTP. Notes will be stored unencrypted.');
 						}
+					} else {
+						console.warn('Encryption not available on HTTP. Notes will be stored unencrypted.');
 					}
 				}
 			}
 			onClose();
 			onSuccess?.();
-		} catch (err: any) {
-			setError(err?.message ?? 'Ошибка авторизации');
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : 'Ошибка авторизации';
+			setError(msg);
 		} finally {
 			setLoading(false);
 		}
