@@ -129,18 +129,16 @@ export default function App() {
 				}));
 			}
 			const rows = await localNotes.list(user.id);
-			if (rows.length > 0) {
-				const mapped: Record<string, VaultNote> = {};
-				for (const r of rows) {
-					let content: string = r.content ?? '';
-					if (typeof content === 'string' && content.startsWith('enc:v1:') && encKey) {
-						const plain = await tryDecryptString(content, encKey);
-						if (plain !== null) content = plain;
-					}
-					mapped[r.id] = { id: r.id, name: r.title ?? 'Без имени.md', updated: r.updatedAt ?? '—', content };
+			const mapped: Record<string, VaultNote> = {};
+			for (const r of rows) {
+				let content: string = r.content ?? '';
+				if (typeof content === 'string' && content.startsWith('enc:v1:') && encKey) {
+					const plain = await tryDecryptString(content, encKey);
+					if (plain !== null) content = plain;
 				}
-				setNotes(mapped);
+				mapped[r.id] = { id: r.id, name: r.title ?? 'Без имени.md', updated: r.updatedAt ?? '—', content };
 			}
+			setNotes(mapped);
 			setMode('welcome');
 		})();
 	}, [encKey]);
